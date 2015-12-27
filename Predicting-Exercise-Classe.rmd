@@ -1,0 +1,120 @@
+---
+title: "Predicting Exercise Classe"
+author: "Russell Allen"
+date: "December 23, 2015"
+output: html_document
+---
+
+```{r, echo=FALSE, message=FALSE}
+library(caret)
+set.seed(312)  # seed the random number generator for repeatability of analysis.
+```
+
+
+## Executive Summary
+
+This analysis examines sensor data while exercising and builds a model to predict the 'classe' of the exercise (being correctly performed or incorrectly in one of 4 common ways.)  The model was constructed against 60% of the available training data using a random forest method.  The remaining 40% of the data was used to cross validate the model and estimate an out of sample error rate.  The resulting model has an in sample accuracy of 98.87% and an estimated out of sample accuracy of 99.3%.  (Note, it is unusual to have an out of sample accuracy greater than the in sample accuracy.)
+
+### Source Data
+
+Six human participants were fitted with 3 sensors, one each on their arm, forearm, and belt.  These sensors recorded 38 geospatial values (pitch, accelerations, etc.) as the participants performed Unilateral Dumbbell Biceps Curls.  The dumbbell contained a 4th sensor similar to those worn by the participants.
+
+Each participant performed 10 repetitions under a trained coach, and were instructed to perform the exercise correctly and incorrectly in one of 4 common ways.  The manner in which they performed the curl is recorded in the data as the 'classe' variable.
+
+This data was captured by the [Human Activity Recognition](http://groupware.les.inf.puc-rio.br/har) project.  See the project site for additional details regarding the data.
+
+```{r, results=FALSE}
+# The original source is HAR as stated above, but the Coursera project provided pre-sliced data that this RMD file expects to find in the local directory.
+# Note, treating empty string as NA.  See Data Cleaning section for explanation.
+allData <- read.csv("pml-training.csv", na.strings = c("","NA"))
+```
+
+The data contains `r dim(allData)[1]` rows of `r dim(allData)[2]` columns, 7 of which are meta-data about the participant, time of event, etc. and 1 of which is the 'classe' variable which this model intends to predict.  This leaves `r dim(allData)[2]-8` columns of potential covariates.  The covariates are equally divided into `r (dim(allData)[2]-8)/4` measures per sensor.
+
+
+### Data Partitioning
+
+There is sufficient data to support partitioning for the purposes of cross-validation.  Of the `r dim(allData)[1]` rows available, we will use 60% for training a prediction model.  The remaining 40% is set aside for estimating the out of sample error of the model.  The model shall be built solely on the 60% training data, and the remaining 40% used only once for cross-validation.
+
+```{r}
+inTrain <- createDataPartition(allData$classe, p=.6,list=FALSE)
+trainData <- allData[inTrain,]
+testData <- allData[-inTrain,]
+```
+
+Training Row Count: `r dim(trainData)[1]`
+
+Evaluation Row Count: `r dim(testData)[1]`
+
+
+### Data Cleaning / Pre-Processing
+
+First, we will remove the meta-data columns, as these should not be used for model building/prediction.
+
+```{r, results=FALSE}
+trainData <- trainData[-1:-7]
+testData <- testData[-1:-7]  # apply same pre-proccessing to test, but DO NOT use for model.
+```
+
+An examination of the training data revealed that many of the sensor values were missing; their values being reported as NA or empty (NA equivalent.)  Interestingly, the number of NAs were identical across all columns that were missing values, and the missing values were identically distributed across the rows as well.
+
+```{r, results=FALSE}
+# summary(trainData)  # large number of NAs in many columns...
+na_count <- data.frame(sapply(trainData, function(y) sum(length(which(is.na(y))))))
+```
+
+Given the high prevalence of NA values in these columns, it is assumed that future data (intended for prediction) may also contain NAs in these columns.  Thus, these columns will not be used for modeling as we can not rely on there presence for prediction.
+
+```{r, results=FALSE}
+goodCols <- rownames(na_count)[na_count[,1]==0]  # list of column names that don't contain NA.
+cleanTrainData <- trainData[goodCols]  # reduce training data to only the columns that have no NAs.
+cleanTestData <- testData[goodCols]  # apply same pre-proccessing to test, but DO NOT use for model.
+```
+
+Elimination of these columns reduced the covariate column count to `r dim(cleanTrainData)[2]-1` total; `r (dim(cleanTrainData)[2]-1)/4` identical measures per sensor.  The measures are roll, pitch, yaw, and total acceleration, plus an x, y and z measure each for gyro, acceleration, and magnet.
+
+```{r, results=FALSE}
+nzv_trainData <- nearZeroVar(trainData, saveMetrics = TRUE)  # many nzv columns in pre-clean data
+nzv_cleanTrainData <- nearZeroVar(cleanTrainData, saveMetrics = TRUE)  # no nzv columns in clean
+na_count_cleanTrainData <- sum(is.na(cleanTrainData))  # 0 NA values, thus nothing to impute.
+```
+
+As verification, a test for near zero values before and after removal of the high NA columns results in many (`r sum(nzv_trainData$nzv)`) and `r sum(nzv_cleanTrainData$nzv)` nzv columns respectively, although near zero value analysis did not identify all high NA columns as nzv.  After removal of the high NA columns, the remaining data is complete; it has `r na_count_cleanTrainData` NA values and thus no data need be imputed.
+
+```{r, results=FALSE}
+# str(cleanTrainData)  # All covariate columns are integer or numeric continuous data
+```
+
+The remaining `r dim(cleanTrainData)[2]-1` potential predictors are all continuous numerical values, and thus there is no reason to create dummy values (as one might for factors or non-continuous values.)
+
+
+### Model Selection & Training
+
+The nature of the data lends itself to a non-linear analysis.  A tree model, bagging, and random forest were all performed, and the random forest had the greatest prediction accuracy.  Thus it was selected as the method for model building.
+
+```{r modelChunk, cache=TRUE,message=FALSE}
+modelFit <- train(classe ~ ., data = cleanTrainData, 
+                  method = "rf",  # specify random forest
+                  trControl = trainControl(method="cv",number=5)  # reduce train time
+                  );
+modelFit;
+```
+
+The selected model has an in sample accuracy of `r max(modelFit$results$Accuracy)*100`%.
+
+
+### Model Evaluation
+
+We will estimate the model's out of sample accuracy by cross validating it against the 'test' data which was set aside at the beginning of this analysis.  Since the model has had no access to the test data, the results of applying the model to the test data will be indicative of the out of sample error/accuracy of this model.
+
+```{r, message=FALSE}
+predictions <- predict(modelFit, newdata = cleanTestData)
+cm <- confusionMatrix(predictions, cleanTestData$classe)
+```
+
+The estimated out of sample accuracy of the resulting model is `r cm$overall[1]*100`%, and the complete results of the evaluation can be seen below:
+
+```{r, echo=FALSE}
+cm
+```
+
